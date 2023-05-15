@@ -1,0 +1,861 @@
+---
+title: "Exploratory data analysis"
+subtitle: "for collagen diseases dataset"
+author:
+  - name: Xiaojing Ni
+    affiliations:
+      - name: Georgetown University  
+    
+date: today
+format:
+    html:
+        toc: true
+        embed-resources: true
+        theme: default
+        code-copy: true
+        code-line-numbers: true
+        number-sections: true
+        highlight-style: github
+        link-external-icon: true
+        link-external-newwindow: true
+        
+---
+The code and data can be found in Github repo: [https://github.com/XiaojingNi/collagen_diseases_eda](https://github.com/XiaojingNi/collagen_diseases_eda)
+
+## Data summary
+In order to explore the mechanisms of collagen diseases, a dataset is extracted from a University hospital database. The overall objective is to study potential factors helping to detect and predict thrombosis, one of the severe complications cased by collagen diseases. The dataset contains three parts: users' information and diagnosis, examination results of users' having thrombosis, and general laboratory examination results. <br>
+
+The examination related to thrombosis mainly through the blood test. Thus, the dataset describing examination results of users' having thrombosis contains anti-Cardiolipin antibody measurement and degree of coagulation measurement (the action or process of blood changing to a solid or semi-solid state), along with the degree of thrombosis. The general laboratory examination results include general blood test, such as Red blood cell count, blood glucose, and total bilirubin. Those tests are not necessary relate to diagnosed thrombosis and can happen anytime when doctors think the patient need them. The three datasets are connected by patient ID. The datasets are one to many relation. For example, one patient can have various tests on same or different date. And patients can also have one or more diagnosis. 
+
+## Initial questions
+The initial questions are listed below. 
+<ul>  
+<li> What are the symptoms causing the doctor suspect a patient is having a thrombosis?
+<li> Are some of the measurements correlated to each other? 
+<li> Are some of the symptoms always occurring together? 
+</ul>
+
+## Data munging
+
+#| echo: false
+#| warning: false
+### this cell is used to run python in qmd so that one notebook can run both r and python
+library(reticulate)
+use_python("/Users/xiaojingni/miniforge3/envs/anly503/bin/python")
+
+```{python}
+# | echo: false
+# | warning: false
+# import packages
+from dateutil import relativedelta
+from datetime import datetime
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import re
+import collections
+import seaborn as sns
+```
+
+### TSUMOTO_A
+#### load patient data
+Some feature meaning
+<ul>
+<li>Description: the date when a patient was input
+<li>First date: the date when a patient came to the hospital
+<li>Admission: patient was admitted to the hospital or followed at the outpatient clinic
+<li>Diagnosis: some patients may suffer from several diseases
+</ul>
+
+```{python}
+# read data
+patients_df_raw = pd.read_csv(
+    "../data/TSUMOTO_A.csv", encoding='windows-1252')
+
+```
+#### Missing values and duplicates
+```{python}
+# basic info of the raw data
+patients_df_raw
+patients_df_raw.info()
+```
+There are some missing values. The missing values are shown below. All of the records have a Id and Diagnosis. Birthday has one missing value. There are 248 patient without the "First Date" information (the date when a patient came to the hospital). 
+```{python}
+patients_df_raw.isna().sum()
+```
+Check if ID column has duplicate value
+```{python}
+# check if ID have duplicate value
+if len(patients_df_raw) != len(set(patients_df_raw.ID)):
+    print("duplicates found in the list")
+else:
+    print("No duplicates found in the list")
+```
+List duplicate ID and their records
+```{python}
+# below code is revised from https://www.trainingint.com/how-to-find-duplicates-in-a-python-list.html
+
+id_set = set()
+dupset = set()
+for i in patients_df_raw.ID:
+    if i not in id_set:
+        id_set.add(i)
+    else:
+        # this method catches the first duplicate entries, and appends them to the list
+        dupset.add(i)
+# The next step is to print the duplicate entries, and the unique entries
+print("List of duplicates\n",
+      patients_df_raw.loc[patients_df_raw['ID'].isin(list(dupset))])
+```
+For patient 2557319, only one record has full data. Thus, the duplicate is probably from a bad entry. Delete one record will solve the problem. For patient 5807039, the first date is the same, but the date input is not, keeping the one with early input. 
+
+```{python}
+patients_df_raw = patients_df_raw.drop(labels=[264, 1215], axis=0)
+
+# sanity check
+# check if ID have duplicate value
+if len(patients_df_raw) != len(set(patients_df_raw.ID)):
+    print("duplicates found in the list")
+else:
+    print("No duplicates found in the list")
+```
+#### Cleaning and data format
+Some of the date entries have type, replacing the letter with "" with solve this. Below I created three new column to change the format of the date columns: "Birthday", "Description", and "First Date". 
+```{python}
+# reformat
+# Birthday
+patients_df_raw['b-day'] = pd.to_datetime(patients_df_raw['Birthday'])
+
+# Description day
+patients_df_raw['d-day'] = pd.to_datetime(patients_df_raw['Description'])
+
+# First Date, remove typo letters
+patients_df_raw['f-day'] = pd.to_datetime(
+    patients_df_raw['First Date'].replace(r"[A-Z]", "", regex=True))
+```
+```{python}
+# f-day (first come to hospital) and d-day need to larger than birthday
+# if not, delete those entries
+
+patients_df_raw = patients_df_raw[(patients_df_raw['f-day']
+                                  > patients_df_raw['b-day']) & (patients_df_raw['d-day'] > patients_df_raw['b-day'])]
+```
+#### New variables
+In this session, new columns of `age_of_first_come` and `diagnosis-n` are created.  `age_of_first_come` is created based on the difference of Description and birthday. And `diagnosis-n` is generated by parsing the diagnosis column.
+```{python}
+patients_df_raw['age_of_first_come'] = patients_df_raw.apply(
+    lambda row: relativedelta.relativedelta(row['d-day'], row['b-day']).years, axis=1)
+# sanity check
+patients_df_raw.head(5)
+```
+```{python}
+# parsing diagnosis
+diagnosis_terms = patients_df_raw['Diagnosis'].str.split(", ")
+d = collections.Counter()
+for phrases in diagnosis_terms:
+    for phrase in phrases:
+        d[phrase] += 1
+
+sorted(d.items(), key=lambda x: x[1], reverse=True)
+```
+```{python}
+diag = patients_df_raw['Diagnosis'].str.split(", ", expand=True)
+diag.columns = ["Diagnosis"+str(i) for i in range(1, 5)]
+patients_df = pd.concat([patients_df_raw, diag], axis=1)
+patients_df.head(5)
+```
+```{python}
+# save to local
+patients_df[["ID", "SEX", "b-day", "d-day", "f-day", "age_of_first_come", "Admission", "Diagnosis1", "Diagnosis2", "Diagnosis3",
+             "Diagnosis4"]].to_csv('../data/tsumotoa_clean.csv', index=False)
+```
+
+### TSUMOTO_B
+#### load data
+
+```{python}
+# read data
+slab_df_raw = pd.read_csv("../data/TSUMOTO_B.csv", encoding='windows-1252')
+
+```
+```{python}
+# examine the data
+slab_df_raw.head(5)
+slab_df_raw.info()
+```
+```{python}
+# values of different columns
+for nm in ["KCT", "RVVT", "LAC", "ANA", "ANA Pattern"]:
+    print(slab_df_raw[nm].value_counts())
+    print("-------------------")
+```
+
+#### Missing values and duplicates
+The dataset contains missing values for some of the columns. Thus, for different purpose, I will use different strategies to deal with missing data. This dataset allows ID has duplication, Thus, here, I only check for duplicate entries for data quality check purpose. <br>
+Joining with other datasets requires ID column. Thus, for join analysis purpose, those records without ID information will be removed. 
+```{python}
+# deduplicate
+slab_df_raw.drop_duplicates()
+```
+```{python}
+# For join dataset
+join_B = slab_df_raw.dropna(subset=['ID'])
+join_B.info
+```
+```{python}
+# save to local
+join_B.to_csv('../data/tsumotob_clean.csv', index=False)
+```
+
+#### Cleaning and data format
+##### Parsing Diagnosis column
+The diagnosis column contains one or more diagnosis. This session is to parse the column into several key words for further analysis. 
+For those thrombosis positive patient, first, using special characters (including space) parses the text, and then calculating the top 10 frequency words. The similar procedure is repeated for those thrombosis negative patient. 
+```{python}
+# Thrombosis positive words
+positive_words = [re.split(r'[^a-zA-Z0-9/s]+', text) for text, label in
+                  zip(slab_df_raw['Diagnosis'], slab_df_raw['Thrombosis']) if label >= 1 and type(text) != float]
+
+positive_dict = collections.Counter()
+for phrases in positive_words:
+    positive_dict += collections.Counter(phrases)
+
+# clean up keywords
+if "" in positive_dict:
+    positive_dict.pop("")
+
+positive_top10 = sorted(positive_dict.items(),
+                        key=lambda x: x[1], reverse=True)[:10]
+positive_top10
+```
+```{python}
+# Thrombosis negative words
+negative_words = [re.split(r'[^a-zA-Z0-9/s]+', text) for text, label in
+                  zip(slab_df_raw['Diagnosis'], slab_df_raw['Thrombosis']) if label == 0 and type(text) != float]
+
+negative_dict = collections.Counter()
+for phrases in negative_words:
+    negative_dict += collections.Counter(phrases)
+
+# clean up keywords
+if "" in negative_dict:
+    negative_dict.pop("")
+
+negative_top10 = sorted(negative_dict.items(),
+                        key=lambda x: x[1], reverse=True)[:10]
+negative_top10
+```
+##### Data format
+Here, I change the examination date to datetime format.
+```{python}
+join_B['Examination Date'] = pd.to_datetime(join_B['Examination Date'])
+```
+### TSUMOTO_C
+#### load data
+
+```{python}
+# | warning: false
+# read data
+clab_df_raw = pd.read_csv("../data/TSUMOTO_C.csv",
+                          encoding='ISO-8859-1', on_bad_lines='skip')
+
+```
+```{python}
+# examine the data
+clab_df_raw.head(5)
+clab_df_raw.info()
+```
+
+#### Missing values and duplicates
+The dataset contains missing values for some of the columns. All data have ID feature. Thus, it should be ok for joining analysis. Other column missing data shows below. The missing value will have different strategy to handle in EDA session. 
+```{python}
+# deduplicate
+clab_df_raw.drop_duplicates()
+
+```
+```{python}
+clab_df_raw.isna().sum()
+```
+
+#### Data format
+Here, I change the date to datetime format.
+```{python}
+clab_df_raw['Date'] = pd.to_datetime(clab_df_raw['Date'])
+```
+```{python}
+# measurement columns to numeric: for those don't have numeric entires, it will fill with NaN
+clab_df_raw['GOT'] = pd.to_numeric(clab_df_raw['GOT'], errors='coerce')
+clab_df_raw['GPT'] = pd.to_numeric(clab_df_raw['GPT'], errors='coerce')
+clab_df_raw['LDH'] = pd.to_numeric(clab_df_raw['LDH'], errors='coerce')
+clab_df_raw['ALP'] = pd.to_numeric(clab_df_raw['ALP'], errors='coerce')
+clab_df_raw['TP'] = pd.to_numeric(clab_df_raw['TP'], errors='coerce')
+clab_df_raw['ALB'] = pd.to_numeric(clab_df_raw['ALB'], errors='coerce')
+clab_df_raw['UA'] = pd.to_numeric(clab_df_raw['UA'], errors='coerce')
+clab_df_raw['UN'] = pd.to_numeric(clab_df_raw['UN'], errors='coerce')
+clab_df_raw['CRE'] = pd.to_numeric(clab_df_raw['CRE'], errors='coerce')
+clab_df_raw['T-BIL'] = pd.to_numeric(clab_df_raw['T-BIL'], errors='coerce')
+clab_df_raw['T-CHO'] = pd.to_numeric(clab_df_raw['T-CHO'], errors='coerce')
+clab_df_raw['TG'] = pd.to_numeric(clab_df_raw['TG'], errors='coerce')
+clab_df_raw['CPK'] = pd.to_numeric(clab_df_raw['CPK'], errors='coerce')
+clab_df_raw['GLU'] = pd.to_numeric(clab_df_raw['GLU'], errors='coerce')
+clab_df_raw['WBC'] = pd.to_numeric(clab_df_raw['WBC'], errors='coerce')
+clab_df_raw['RBC'] = pd.to_numeric(clab_df_raw['RBC'], errors='coerce')
+clab_df_raw['HGB'] = pd.to_numeric(clab_df_raw['HGB'], errors='coerce')
+clab_df_raw['HCT'] = pd.to_numeric(clab_df_raw['HCT'], errors='coerce')
+clab_df_raw['PLT'] = pd.to_numeric(clab_df_raw['PLT'], errors='coerce')
+clab_df_raw['PT'] = pd.to_numeric(clab_df_raw['PT'], errors='coerce')
+clab_df_raw['APTT'] = pd.to_numeric(clab_df_raw['APTT'], errors='coerce')
+clab_df_raw['FG'] = pd.to_numeric(clab_df_raw['FG'], errors='coerce')
+clab_df_raw['PIC'] = pd.to_numeric(clab_df_raw['PIC'], errors='coerce')
+clab_df_raw['TAT'] = pd.to_numeric(clab_df_raw['TAT'], errors='coerce')
+clab_df_raw['U-PRO'] = pd.to_numeric(clab_df_raw['U-PRO'], errors='coerce')
+clab_df_raw['IGG'] = pd.to_numeric(clab_df_raw['IGG'], errors='coerce')
+clab_df_raw['IGA'] = pd.to_numeric(clab_df_raw['IGA'], errors='coerce')
+clab_df_raw['IGM'] = pd.to_numeric(clab_df_raw['IGM'], errors='coerce')
+clab_df_raw['RF'] = pd.to_numeric(clab_df_raw['RF'], errors='coerce')
+clab_df_raw['C3'] = pd.to_numeric(clab_df_raw['C3'], errors='coerce')
+clab_df_raw['C4'] = pd.to_numeric(clab_df_raw['C4'], errors='coerce')
+clab_df_raw['DNA'] = pd.to_numeric(clab_df_raw['DNA'], errors='coerce')
+clab_df_raw['DNA-II'] = pd.to_numeric(clab_df_raw['DNA-II'], errors='coerce')
+```
+
+#### New columns
+For lab test, there are criteria indicating whether a indicator is out of normal range. In this session, new variable introduced based on those criteria. Note: those with gender difference will be dealt with later. 
+```{python}
+clab_df = clab_df_raw.copy()
+clab_df = clab_df.assign(is_GOT_normal=np.where(clab_df['GOT'] >= 60, 'no', np.where(clab_df['GOT'] < 60, 'yes', 'NaN')),  # is_GOT_normal N<60
+               is_GPT_normal=np.where(clab_df['GPT'] >= 60, 'no', np.where(
+                   clab_df['GPT'] < 60, 'yes', 'NaN')),  # is_GPT_normal N<60
+               is_LDH_normal=np.where(clab_df['LDH'] >= 500, 'no', np.where(
+                   clab_df['LDH'] < 500, 'yes', 'NaN')),  # is_LDH_normal N<500
+               is_ALP_normal=np.where(clab_df['ALP'] >= 300, 'no', np.where(
+                   clab_df['ALP'] < 300, 'yes', 'NaN')),  # is_ALP_normal N<300
+               is_TP_normal=np.where(((clab_df['TP'] >= 8.5) | (clab_df['TP'] <= 6)), 'no', np.where(
+                   ((clab_df['TP'] < 8.5) & (clab_df['TP'] > 6)), 'yes', 'NaN')),  # is_TP_normal 6<N<8.5
+               is_ALB_normal=np.where(((clab_df['ALB'] >= 5.5) | (clab_df['ALB'] <= 3.5)), 'no', np.where(
+                   ((clab_df['ALB'] < 5.5) & (clab_df['ALB'] > 3.5)), 'yes', 'NaN')),  # is_ALB_normal 3.5<N<5.5
+               is_UN_normal=np.where(clab_df['UN'] <= 30, 'no', np.where(
+                   clab_df['UN'] > 30, 'yes', 'NaN')),  # is_UN_normal N>30
+               is_CRE_normal=np.where(clab_df['CRE'] <= 1.5, 'no', np.where(
+                   clab_df['CRE'] > 1.5, 'yes', 'NaN')),  # is_CRE_normal N>1.5
+               is_TBIL_normal=np.where(clab_df['T-BIL'] >= 2, 'no', np.where(
+                   clab_df['T-BIL'] < 2, 'yes', 'NaN')),  # is_T-BIL_normal N<2
+               is_TCHO_normal=np.where(clab_df['T-CHO'] >= 250, 'no', np.where(
+                   clab_df['T-CHO'] < 250, 'yes', 'NaN')),  # is_T-CHO_normal N<250
+               is_TG_normal=np.where(clab_df['TG'] >= 200, 'no', np.where(
+                   clab_df['TG'] < 200, 'yes', 'NaN')),  # is_TG_normal N<200
+               is_CPK_normal=np.where(clab_df['CPK'] >= 250, 'no', np.where(
+                   clab_df['CPK'] < 250, 'yes', 'NaN')),  # is_CPK_normal N<250
+               is_GLU_normal=np.where(clab_df['GLU'] >= 180, 'no', np.where(
+                   clab_df['GLU'] < 180, 'yes', 'NaN')),  # is_GLU_normal N<180
+               is_WBC_normal=np.where(((clab_df['WBC'] >= 9000) | (clab_df['WBC'] <= 3500)), 'no', np.where(
+                   ((clab_df['WBC'] < 9000) & (clab_df['WBC'] > 3500)), 'yes', 'NaN')),  # is_WBC_normal 3500<N<9000
+               is_RBC_normal=np.where(((clab_df['RBC'] >= 600) | (clab_df['RBC'] <= 350)), 'no', np.where(
+                   ((clab_df['RBC'] < 600) & (clab_df['RBC'] > 350)), 'yes', 'NaN')),  # is_RBC_normal 350<N<600
+               is_HGB_normal=np.where(((clab_df['HGB'] >= 17) | (clab_df['HGB'] <= 10)), 'no', np.where(
+                   ((clab_df['HGB'] < 17) & (clab_df['HGB'] > 10)), 'yes', 'NaN')),  # is_HGB_normal 10<N<17
+               is_HCT_normal=np.where(((clab_df['HCT'] >= 52) | (clab_df['HCT'] <= 29)), 'no', np.where(
+                   ((clab_df['HCT'] < 52) & (clab_df['HCT'] > 29)), 'yes', 'NaN')),  # is_HGB_normal 29<N<52
+               is_PLT_normal=np.where(((clab_df['PLT'] >= 400) | (clab_df['PLT'] <= 100)), 'no', np.where(
+                   ((clab_df['PLT'] < 400) & (clab_df['PLT'] > 100)), 'yes', 'NaN')),  # is_PLT_normal 100<N<400
+               is_PT_normal=np.where(clab_df['PT'] >= 14, 'no', np.where(
+                   clab_df['PT'] < 14, 'yes', 'NaN')),  # is_PT_normal N<14
+               is_APTT_normal=np.where(clab_df['APTT'] >= 45, 'no', np.where(
+                   clab_df['APTT'] < 45, 'yes', 'NaN')),  # is_APTT_normal N<45
+               is_FG_normal=np.where(((clab_df['FG'] >= 450) | (clab_df['FG'] <= 150)), 'no', np.where(
+                   ((clab_df['FG'] < 450) & (clab_df['FG'] > 150)), 'yes', 'NaN')),  # is_FG_normal 150<N<450
+               is_PIC_normal=np.where(clab_df['PIC'] >= 0.8, 'no', np.where(
+                   clab_df['PIC'] < 0.8, 'yes', 'NaN')),  # is_PIC_normal N<0.8
+               is_TAT_normal=np.where(clab_df['TAT'] >= 3, 'no', np.where(
+                   clab_df['TAT'] < 3, 'yes', 'NaN')),  # is_TAT_normal N<3
+               is_UPRO_normal=np.where(((clab_df['U-PRO'] >= 30) | (clab_df['U-PRO'] <= 0)), 'no', np.where(
+                   ((clab_df['U-PRO'] < 30) & (clab_df['U-PRO'] > 0)), 'yes', 'NaN')),  # is_U-PRO_normal 0<N<30
+               is_IGG_normal=np.where(((clab_df['IGG'] >= 2000) | (clab_df['IGG'] <= 900)), 'no', np.where(
+                   ((clab_df['IGG'] < 2000) & (clab_df['IGG'] > 900)), 'yes', 'NaN')),  # is_IGG_normal 900<N<2000
+               is_IGA_normal=np.where(((clab_df['IGA'] >= 500) | (clab_df['IGA'] <= 80)), 'no', np.where(
+                   ((clab_df['IGA'] < 500) & (clab_df['IGA'] > 80)), 'yes', 'NaN')),  # is_IGA_normal 80<N<500
+               is_IGM_normal=np.where(((clab_df['IGM'] >= 400) | (clab_df['IGM'] <= 40)), 'no', np.where(
+                   ((clab_df['IGM'] < 400) & (clab_df['IGM'] > 40)), 'yes', 'NaN')),  # is_IGM_normal 40<N<400
+               is_RF_normal=np.where(clab_df['RF'] >= 20, 'no', np.where(
+                   clab_df['RF'] < 20., 'yes', 'NaN')),  # is_RF_normal N<20
+               is_C3_normal=np.where(clab_df['C3'] <= 35, 'no', np.where(
+                   clab_df['C3'] > 35, 'yes', 'NaN')),  # is_C3_normal N>35
+               is_C4_normal=np.where(clab_df['C4'] <= 10, 'no', np.where(
+                   clab_df['C4'] > 10, 'yes', 'NaN')),  # is_C4_normal N>10
+               is_DNA_normal=np.where(clab_df['DNA'] >= 8, 'no', np.where(
+                   clab_df['DNA'] < 8., 'yes', 'NaN')),  # is_DNA_normal N<8
+               is_DNAII_normal=np.where(clab_df['DNA-II'] >= 8, 'no', np.where(
+                   clab_df['DNA-II'] < 8, 'yes', 'NaN')),  # is_DNAII_normal N<8
+
+               )
+
+```
+### Join data
+For analysis using patient information, three dataset are joined to see if there are any patterns. 
+```{python}
+# cleaned a data
+patients_df = pd.read_csv("../data/tsumotoa_clean.csv")
+patients_df['b-day'] = pd.to_datetime(patients_df['b-day'])
+patients_df['d-day'] = pd.to_datetime(patients_df['d-day'])
+patients_df['f-day'] = pd.to_datetime(patients_df['f-day'])
+# cleaned a data
+slab_df = pd.read_csv("../data/tsumotob_clean.csv")
+slab_df['Examination Date'] = pd.to_datetime(slab_df['Examination Date'])
+# left join
+join_df = clab_df.merge(patients_df, on='ID', how='left')
+
+# outer join on b and c data
+join_df = join_df.merge(slab_df, on='ID', how='outer')
+```
+```{python}
+# date formatting
+join_df['b-day'] = pd.to_datetime(join_df['b-day'])
+join_df['d-day'] = pd.to_datetime(join_df['d-day'])
+join_df['f-day'] = pd.to_datetime(join_df['f-day'])
+join_df['Examination Date'] = pd.to_datetime(join_df['Examination Date'])
+join_df['Examination Date'] = pd.to_datetime(join_df['Examination Date'])
+
+```
+#### Missing values
+There are missing values in the data. some of there are caused by merging dataset. For example, there are patient only did special lab test but not regular, or the other way around. For now, we are not removing any of them. We will deal with missing values in EDA session with various strategies according to the features. 
+```{python}
+join_df.isna().sum()
+```
+```{python}
+# Examination Date for special examination need to larger than birthday
+# if not, delete those entries
+
+join_df_2 = join_df[(join_df['Examination Date'] > join_df['b-day'])]
+```
+#### New columns
+`Age of special exam` is the age the patient did the special examination.  
+```{python}
+join_df_2['age_of_sexam'] = join_df_2.apply(
+    lambda row: relativedelta.relativedelta(row['Examination Date'], row['b-day']).years, axis=1)
+# sanity check
+join_df_2.head(5)
+```
+`Is UA normal` depends on the gender, N > 8.0 (Male) N > 6.5 (Female). 
+```{python}
+join_df = join_df.assign(is_UA_normal=np.where(((join_df['UA'] <= 8) & (join_df['SEX'] == 'M')), 'no', np.where(((join_df['UA'] < 8) & (join_df['SEX'] == 'M')), 'yes', np.where(((join_df['UA'] <= 6.5) & (join_df['SEX'] == 'F')), 'no',np.where(((join_df['UA'] > 6.5) & (join_df['SEX'] == 'F')), 'yes', 'NaN'))))) # N > 8.0 (Male) N > 6.5 (Female)
+```
+## Exploratory analysis
+### Individual datasets
+#### Summary statistics of patient information
+```{python}
+# | label: fig-piechartsex
+# | fig-cap: "Patient gender distribution"
+# | fig-align: "center"
+# | warning: false
+
+# Defining colors for the pie chart
+colors = ['pink', 'steelblue']
+
+# Define the ratio of gap of each fragment in a tuple
+explode = (0.05, 0.05)
+
+# plot pie chart as grouped by sex
+fig = plt.figure(1)
+piechart = patients_df['SEX'].value_counts().plot(kind='pie',
+                                                  autopct='%1.0f%%',
+                                                  colors=colors,
+                                                  explode=explode,
+                                                  labels=["Female", "Male"],
+                                                  fontsize=12)
+plt.legend(bbox_to_anchor=(-0.05, -0.1), loc='lower left', fontsize=12)
+plt.suptitle('Patient gender distribution', fontsize=16)
+fig.show();
+```
+
+Female is the dominated gender of the patients (@fig-piechartsex). 
+
+```{python}
+# | label: fig-descriptionvsfirst
+# | fig-cap: "Description date VS First date"
+# | fig-align: "center"
+# | warning: false
+
+fig = plt.figure(2)
+plt.scatter(patients_df['d-day'], patients_df['f-day'])
+plt.ylim([pd.Timestamp('1970-01-01'), pd.Timestamp('2000-12-31')])
+plt.title("description date VS first date")
+plt.xlabel("description date")
+plt.ylabel("first date")
+fig.show();
+# first date always smaller than description date
+# can't use one date to replace another one
+```
+First date always smaller than description date, so that we can't use one date to replace another one (@fig-descriptionvsfirst). There are some years have less or no data (i.e. 1995). 
+
+#### Special lab information
+Thrombosis level vs examination date (@fig-examinevsthrom). We can see the large portion of case happened after 1992. 1998 is the year have the greatest number of cases. 
+```{python}
+# | label: fig-examinevsthrom
+# | fig-cap: "Examination Date VS Thrombosis"
+# | fig-align: "center"
+# | warning: false
+
+
+ax = slab_df['Examination Date'].hist(by=slab_df['Thrombosis'],bins=10)
+
+```
+Plot keywords and frequency (@fig-diagnosekeywords). 
+```{python}
+# | label: fig-diagnosekeywords
+# | fig-cap: "Thrombosis diagnosis keywords"
+# | fig-align: "center"
+# | warning: false
+
+# join keywords
+key_set = {k for k, _ in positive_top10} | {k for k, _ in negative_top10}
+# order by Thrombosis positive decreasing
+key_ls = sorted(key_set, key=lambda x: (positive_dict[x], negative_dict[x]))
+
+# plot keywords RELATIVE frequency
+nb_positive, nb_negative = sum(
+    slab_df['Thrombosis'] > 0), sum(slab_df['Thrombosis'] == 0)
+
+hN = plt.barh(key_ls, [negative_dict[k] /
+              nb_negative for k in key_ls], label='negative', color='g')
+hS = plt.barh(key_ls, [-positive_dict[k] /
+              nb_positive for k in key_ls], label='positive')
+
+
+plt.xlim([-1, 1])
+xt = plt.xticks()
+n = xt[0]
+s = ['%.1f' % abs(i) for i in n]
+plt.xticks(n, s)
+
+plt.legend(loc='best')
+plt.axvline(0.0)
+fig.show();
+```
+Correlation among three index in special lab results (@fig-slabcorr).
+```{python}
+# | label: fig-slabcorr
+# | fig-cap: "'aCL IgG', 'aCL IgM', 'aCL IgA' Correlation"
+# | fig-align: "center"
+# | warning: false
+
+#
+# # transfer by log(x+1)
+# correlation could be misleading as too much 0 values
+# red are Thrombosis and blue are not Thrombosis
+temp = slab_df[['aCL IgG', 'aCL IgM', 'aCL IgA']].copy()
+temp = temp.apply(lambda x: np.log10(x+1))
+
+d_colors = {0: "blue", 1: "green", 2: "m", 3: "k"}
+colors = [d_colors[x] for x in slab_df['Thrombosis']]
+axl = pd.plotting.scatter_matrix(temp, color=colors)
+```
+
+Parallel coordinates for Thrombosis levels. <br>
+**NOTE: The document indicate there are three levels of the Thrombosis, however, the data have 4 levels: 0, 1, 2, 3. Considering it make sense that 3 is another more severe level of Thrombosis, in this EDA, 3 is treated as more severe level of Thrombosis.** 
+```{python}
+# | label: fig-slabcatecorr
+# | fig-cap: "'KCT', 'RVVT', 'LAC' Correlation"
+# | fig-align: "center"
+# | warning: false
+
+KCT_present = slab_df['KCT'].apply(lambda x: type(x)) != float
+RVVT_present = slab_df['RVVT'].apply(lambda x: type(x)) != float
+LAC_present = slab_df['LAC'].apply(lambda x: type(x)) != float
+
+print("There are %s records with all three indexes present." %
+      sum(KCT_present & RVVT_present & LAC_present))
+
+
+temp_df = slab_df[['Thrombosis', 'KCT', 'RVVT', 'LAC']
+                  ][KCT_present & RVVT_present & LAC_present].copy()
+fig = plt.figure(6)
+
+pd.plotting.parallel_coordinates(
+    temp_df, 'Thrombosis', sort_labels=True, colormap='viridis')
+
+fig.show();
+```
+The overlap of parallel coordinates plot (@fig-slabcatecorr) indicates that three indicator combination is not a good indicator of the level of Thrombosis. <br>
+
+#### General lab information
+```{python}
+# | label: fig-heatmaplab
+# | fig-cap: "Heatmap of general lab index"
+# | fig-align: "center"
+# | warning: false
+
+fig = plt.figure(7,figsize=(12, 10))
+corr = clab_df.corr(method='spearman')
+sns.heatmap(corr, annot=True, annot_kws={"size": 28 / np.sqrt(len(corr))})
+
+fig.show();
+```
+There are some correlation in the data (@fig-heatmaplab). For example, APTT and PT has high negative correlation. FG and APTT also has correlation of 0.53. If we want to do further analysis on the numerical value of those measurements, these correlations need to be considered. 
+
+### Join dataset
+```{python}
+# | label: fig-agehist
+# | fig-cap: "Thrombosis VS Age"
+# | fig-align: "center"
+# | warning: false
+
+## plot age and Thrombosis level
+temp = join_df_2.pivot(columns='Thrombosis', values='age_of_sexam')
+ax = temp.plot.hist(bins=20)
+
+```
+Different level of Thrombosis have various age distribution (@fig-agehist). Regardless of number of samples, severe thrombosis happens high in 30's, while level 2 thrombosis happens during younger age. 
+
+```{python}
+# | fig-cap: "Parallel coordinates plot of general lab index"
+# | fig-align: "center"
+# | warning: false
+
+temp_df = join_df[['Thrombosis', 'is_GOT_normal', 'is_GPT_normal',
+       'is_LDH_normal', 'is_ALP_normal', 'is_TP_normal', 'is_ALB_normal',
+       'is_UN_normal', 'is_CRE_normal', 'is_TBIL_normal', 'is_TCHO_normal',
+       'is_TG_normal', 'is_CPK_normal', 'is_GLU_normal', 'is_WBC_normal',
+       'is_RBC_normal', 'is_HGB_normal', 'is_HCT_normal', 'is_PLT_normal',
+       'is_PT_normal', 'is_APTT_normal', 'is_FG_normal', 'is_PIC_normal',
+       'is_TAT_normal', 'is_UPRO_normal', 'is_IGG_normal', 'is_IGA_normal',
+       'is_IGM_normal', 'is_RF_normal', 'is_C3_normal', 'is_C4_normal',
+       'is_DNA_normal', 'is_DNAII_normal','is_UA_normal']
+                  ]
+temp_df = temp_df.dropna() ## don't need those without these information
+temp_df['Thrombosis'] = temp_df['Thrombosis'].astype(float).astype(int)
+
+temp_df.reset_index(drop=True)
+
+temp_df1= temp_df[temp_df['Thrombosis'].isin([1,2,3])]
+temp_df1.reset_index(drop=True)
+
+temp_df0= temp_df[temp_df['Thrombosis']==0]
+temp_df0.reset_index(drop=True)
+
+temp_df2= temp_df[temp_df['Thrombosis']==1]
+temp_df2.reset_index(drop=True)
+
+temp_df3= temp_df[temp_df['Thrombosis']==2]
+temp_df3.reset_index(drop=True)
+
+temp_df4= temp_df[temp_df['Thrombosis']==3]
+temp_df4.reset_index(drop=True)
+
+
+fig = plt.figure(9)
+
+pd.plotting.parallel_coordinates(
+    temp_df, 'Thrombosis', sort_labels=True, colormap='viridis')
+plt.xticks(rotation=45)
+
+
+
+fig = plt.figure(10)
+
+pd.plotting.parallel_coordinates(
+    temp_df2, 'Thrombosis', sort_labels=True, colormap='viridis')
+plt.xticks(rotation=45)
+
+
+
+fig = plt.figure(11)
+
+pd.plotting.parallel_coordinates(
+    temp_df3, 'Thrombosis', sort_labels=True, colormap='viridis')
+plt.xticks(rotation=45)
+
+
+
+fig = plt.figure(12)
+
+pd.plotting.parallel_coordinates(
+    temp_df4, 'Thrombosis', sort_labels=True, colormap='viridis')
+plt.xticks(rotation=45)
+
+fig = plt.figure(13)
+
+pd.plotting.parallel_coordinates(
+    temp_df0, 'Thrombosis', sort_labels=True, colormap='viridis')
+plt.xticks(rotation=45)
+
+
+
+```
+
+## Final plots
+### Plot-01: Thrombosis VS Age
+```{python}
+#| echo: false
+import matplotlib as mpl
+from pathlib import Path
+cfgdir = mpl.get_configdir() # find your configuration folder
+p = Path(cfgdir)
+print(p)
+stylelib = (p / 'stylelib')
+stylelib.mkdir(exist_ok=True)
+path = stylelib / 'anly503.mplstyle' # create paths
+path.write_text(''' # write into the file
+figure.subplot.wspace : 0.06
+axes.prop_cycle : cycler(color=['9351A8', '68AC54', 'b', 'tomato'])
+axes.facecolor : linen
+font.family : arial
+lines.linewidth : 5
+axes.labelsize : 18
+xtick.labelsize : 18
+ytick.labelsize : 18
+axes.titlesize : 22
+lines.markersize : 14
+legend.fontsize: 18
+legend.title_fontsize: 18
+legend.markerscale: 1.8
+axes.grid: True
+grid.linestyle: -- 
+legend.labelspacing:  0.65
+''')
+plt.style.reload_library()
+```
+```{python}
+# | label: plot-01
+# | fig-cap: "Thrombosis VS Age"
+# | fig-align: "center"
+# | warning: false
+
+plt.style.use("anly503")
+## plot age and Thrombosis level
+join_df_2['Thrombosis'] = join_df_2['Thrombosis'].astype(float).astype(int)
+temp = join_df_2.pivot(columns='Thrombosis', values='age_of_sexam')
+ax = temp.plot.hist(bins=20,edgecolor = "white")
+ax.figure.set_figwidth(10)
+ax.figure.set_figheight(6)
+plt.title("Thrombosis VS Age")
+plt.xlabel("Age")
+plt.legend(title="Thrombosis level")
+text =plt.text(s='Note: 0 is no thrombosis, 1 is positive thrombosis,\n 2 is severe thrombosis, 3 is more severe thrombosis.',y=-350,x=-13,fontsize=14)
+plt.savefig("../plot/plot-01.png", bbox_inches = 'tight');
+```
+
+### Plot-02: Thrombosis diagnosis keywords
+```{python}
+# | label: fig-plot-02
+# | fig-cap: "Thrombosis diagnosis keywords"
+# | fig-align: "center"
+# | warning: false
+
+from matplotlib.ticker import FuncFormatter
+
+fig = plt.figure(11)
+fig.figure.set_figwidth(13)
+fig.figure.set_figheight(7)
+
+hN = plt.barh(key_ls, [negative_dict[k] /
+              nb_negative for k in key_ls], label='negative', color='g')
+hS = plt.barh(key_ls, [-positive_dict[k] /
+              nb_positive for k in key_ls], label='positive')
+
+plt.xlim([-1, 1])
+xt = plt.xticks()
+n = xt[0]
+s = ['{:,.0%}'.format(abs(i)) for i in n]
+yhn = [negative_dict[k]/nb_negative for k in key_ls]
+yhs = [-positive_dict[k] /nb_positive for k in key_ls]
+neglabel1 = ['{:,.0%}'.format(abs(i)) for i in yhn]
+neglabel = [i if i!="0%" else "" for i in neglabel1]
+# neglabel = list(map(lambda x: x.replace('\b0%', ''), neglabel1))
+poslabel1 = ['{:,.0%}'.format(abs(i)) for i in yhs]
+poslabel = [i if i!="0%" else "" for i in poslabel1]
+
+plt.xticks(n, s)
+
+plt.bar_label(hN, labels=neglabel, fontsize=18, padding=8)
+plt.bar_label(hS, labels=poslabel,fontsize=18,padding=8)
+
+plt.legend(loc='best')
+plt.axvline(0.0)
+plt.title("Thrombosis diagnosis keywords",pad=10, fontsize = 28)
+plt.xlabel("Percentage",fontsize = 24)
+plt.ylabel("Diagnosis",fontsize = 24)
+plt.legend(title="Thrombosis diagnosis",fontsize = 24)
+plt.savefig("../plot/plot-02.png");
+```
+
+### Plot-03: Correlation plot
+```{python}
+# | label: fig-plot-03
+# | fig-cap: "Special lab index correlation plot"
+# | fig-align: "center"
+# | warning: false
+
+fig = plt.figure(12,figsize=(14, 12))
+temp = clab_df.loc[:, clab_df.columns != 'ID']
+corr = temp.corr(method='spearman')
+sns.heatmap(corr, annot=True, annot_kws={"size": 28 / np.sqrt(len(corr))})
+plt.title("Special lab index correlation plot",pad=10, fontsize = 28 )
+plt.xlabel("Index",fontsize = 24)
+plt.ylabel("Index",fontsize = 24)
+plt.savefig("../plot/plot-03.png");
+```
+
+### Plot-04: Parallel coordinates plot
+```{python}
+# | label: fig-plot-04
+# | fig-cap: "Parallel coordinates plot of general lab index"
+# | fig-align: "center"
+# | warning: false
+from matplotlib.patches import Rectangle
+
+
+temp_df['Thrombosis'] = temp_df['Thrombosis'].astype(float).astype(int)
+temp_df.reset_index(drop=True)
+
+temp_df1= temp_df[temp_df['Thrombosis'].isin([2,3])]
+temp_df1.reset_index(drop=True)
+
+plt.figure(13,figsize=(18, 10))
+
+pd.plotting.parallel_coordinates(
+    temp_df1.sort_values(by='Thrombosis'), 'Thrombosis', sort_labels=True,color=( '#FF6B6B', '#4ECDC4'))
+plt.xticks(rotation=45)
+plt.title("General lab examination VS Severe thrombosis", pad=20, fontsize = 36)
+plt.xlabel("Examinatoion index",fontsize = 32)
+plt.ylabel("Results",fontsize = 32)
+plt.legend(title="Thrombosis level",bbox_to_anchor=(1, 0.8))
+text = plt.text(s='Note: 2 is severe thrombosis, 3 is more severe thrombosis.',y=-0.8,x=-1,fontsize=24)
+
+plt.gca().add_patch(Rectangle((4,0.9),3,0.2,
+                    edgecolor='black',
+                    facecolor='none',
+                    lw=4))
+plt.gca().add_patch(Rectangle((13,0.9),4,0.2,
+                    edgecolor='black',
+                    facecolor='none',
+                    lw=4))
+
+plt.savefig("../plot/plot-04.png", bbox_inches = 'tight');
+
+```
+
+## Technical summary
+
+This EDA has been implemented several techniques including histogram, correlation plot, and parallel coordinate plot. The histogram is used to obtain the idea of how data is distributed. For example, in @fig-examinevsthrom, the examination year is plotted against exmanimation count with various thrombosis levels, which demonstrate in what years, the different levels of thrombosis occured. This kind of plot can imply where the high frequency happened and need to be further examined. Correlation plot used Spearman ranked correlation ([source](https://en.wikipedia.org/wiki/Spearman%27s_rank_correlation_coefficient)) in @fig-heatmaplab and @fig-slabcorr. These plots demonstrate the correlation among variables. If there are some high correlationed features, these are the signs to further analyze high correlated feature or need to consider during modeling process. Finally, the parallel coordinate plots used in @fig-slabcatecorr and @fig-plot-04 are ways to show cluster information of categorical varibles. The color of the lines indicate different groups, while the patterns of the color-coded lines implying the clustering. <br>
+The datasets are required some manipulation and cleaning. In this EDA, the datasets have been deduped and checked missing values for exploration. However, for different tasks, missing values were treated differently. In the correlation calculation, missing values were removed, as most of the features in the correlation plot has a few missing values. For creating new variables to measure if a test is in the normal range, NA is introduced into the data when there was a bad entry. For example, if the measurement suposed to be a numeric but it is not, it will fill with NaN. Those NaN is not meaningless. It can indicate not having the test which implys that doctors may think the index is not relevant to thrombosis. The missing values also block me from exploring my inital question about the symptoms. Thus, I changed my analysis to focusing on diagnosis and thrombosis relationship. <br>
+The datasets and the documents also have some uncertainties. For example, the data document indicate there are three levels of the Thrombosis, however, the data have 4 levels: 0, 1, 2, 3. Considering it make sense that 3 is another more severe level of Thrombosis, in this EDA, 3 is treated as more severe level of Thrombosis. <br>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
