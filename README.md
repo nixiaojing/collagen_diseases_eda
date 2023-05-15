@@ -1,4 +1,4 @@
-Visual Exploratory Data Analysis and professional report generation
+## Visual Exploratory Data Analysis and professional report generation
 
 This repo contains the exercise of EDA using the collagen diseases data in `data/` folder. The packages used to generated the plots are **ggplot2** and its extensions (in R) and **matplotlib/seaborn** (in Python). 
 
